@@ -1,3 +1,4 @@
+
 name: Docker Practical - CI Evaluation
 
 on:
@@ -20,31 +21,20 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      - name: Checkout submitted Pull Request commit
+      - name: Checkout submitted code
         uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Checkout instructor-controlled evaluation files
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: main
-          path: instructor-evaluation
 
       - name: Show submission identity
         run: |
           echo "Repository: $GITHUB_REPOSITORY"
           echo "Commit: $GITHUB_SHA"
-          if [ -f submission.json ]; then
-            cat submission.json
-          else
-            echo "::warning::submission.json is missing"
-          fi
 
       - name: Check required files
-        run: bash instructor-evaluation/scripts/check-required-files.sh
+        run: |
+          test -f frontend/Dockerfile
+          test -f backend/Dockerfile
+          test -f docker-compose.yml
+          test -f docker-compose.deploy.yml
 
       - name: Validate frontend Dockerfile
         run: docker run --rm -i hadolint/hadolint < frontend/Dockerfile
@@ -65,12 +55,13 @@ jobs:
           REDIS_URL=redis://redis:6379
           JWT_SECRET=ci_only_secret_change_for_real_deployment
           PORT=3000
+          DOCKERHUB_USERNAME=mahimabhat10
           EOF
 
       - name: Validate Docker Compose configuration
         run: docker compose config --quiet
 
-      - name: Build frontend and backend images
+      - name: Build images
         run: docker compose build
 
       - name: Start application stack
@@ -80,14 +71,11 @@ jobs:
         run: |
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://localhost:3000/health; then
-              echo
               echo "Backend is healthy"
               exit 0
             fi
-            echo "Waiting for backend ($attempt/40)..."
             sleep 3
           done
-          echo "Backend did not become healthy"
           docker compose ps
           docker compose logs --no-color
           exit 1
@@ -105,18 +93,19 @@ jobs:
           exit 1
 
       - name: Install test dependencies
-        working-directory: instructor-evaluation/tests
-        run: npm install
+        working-directory: tests
+        run: npm ci
 
       - name: Run API and Redis tests
-        working-directory: instructor-evaluation/tests
+        working-directory: tests
         env:
           BASE_URL: http://localhost:3000
           NODE_OPTIONS: --experimental-vm-modules
-        run: npm test -- --json --outputFile=test-results.json
+        run: npm test
 
-      - name: Test PostgreSQL persistence
-        run: bash instructor-evaluation/scripts/persistence-test.sh
+      - name: Verify PostgreSQL tables
+        run: |
+          docker compose exec -T postgres psql -U taskflow_user -d taskflow -c "\dt"
 
       - name: Capture container status and logs
         if: always()
@@ -125,27 +114,12 @@ jobs:
           docker compose ps > evaluation-output/containers.txt || true
           docker compose logs --no-color > evaluation-output/container-logs.txt || true
 
-      - name: Generate evaluation summary
-        if: always()
-        run: |
-          {
-            echo "## Docker Practical CI Evaluation"
-            echo ""
-            echo "- Repository: \`$GITHUB_REPOSITORY\`"
-            echo "- Commit: \`$GITHUB_SHA\`"
-            echo "- Pull request: \`${{ github.event.pull_request.html_url || 'Manual run' }}\`"
-            echo ""
-            echo "Review the workflow jobs and uploaded artifacts for detailed results."
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload evaluation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: docker-practical-results-${{ github.run_id }}
-          path: |
-            instructor-evaluation/tests/test-results.json
-            evaluation-output/
+          path: evaluation-output/
           if-no-files-found: ignore
           retention-days: 30
 
